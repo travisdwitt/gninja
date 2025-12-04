@@ -92,6 +92,20 @@ type BloodParticle struct {
 	EnemyID  int     // ID of the enemy this particle came from
 }
 
+// Corpse represents a temporarily mobile body after decapitation
+type Corpse struct {
+	Pos            Vec2
+	Facing         int
+	Active         bool
+	EnemyID        int
+	EndTime        time.Time
+	MoveDir        int
+	LastDirChange  time.Time
+	DirDuration    time.Duration
+	LastBloodEmit  time.Time
+	WasOnPlatform  bool
+}
+
 type Platform struct {
 	X      float64 // Left edge X position
 	Y      float64 // Top edge Y position
@@ -105,6 +119,7 @@ type Game struct {
 	projectiles        []Projectile
 	enemies            []Enemy
 	deathParticles     []DeathParticle
+	corpses            []Corpse
 	bloodParticles     []BloodParticle
 	platforms          []Platform
 	score              int
@@ -167,6 +182,7 @@ func NewGame(screen tcell.Screen) *Game {
 		projectiles:        make([]Projectile, 0),
 		enemies:            make([]Enemy, 0),
 		deathParticles:     make([]DeathParticle, 0),
+		corpses:            make([]Corpse, 0),
 		bloodParticles:     make([]BloodParticle, 0),
 		platforms:          platforms,
 		score:              0,
@@ -240,6 +256,40 @@ func (g *Game) drawEnemy(e *Enemy) {
 		g.screen.SetContent(x, y+1, '/', nil, style)
 		g.screen.SetContent(x+1, y+1, '|', nil, style)
 		g.screen.SetContent(x+2, y+1, ')', nil, style)
+		g.screen.SetContent(x, y+2, '(', nil, style)
+		g.screen.SetContent(x+1, y+2, ' ', nil, style)
+		g.screen.SetContent(x+2, y+2, '\\', nil, style)
+	}
+}
+
+func (g *Game) drawCorpse(c *Corpse) {
+	x := int(c.Pos.X)
+	y := int(c.Pos.Y)
+	style := tcell.StyleDefault.Foreground(tcell.ColorLightGray)
+	// Draw a headless, shuffling corpse
+	if c.Facing == 1 {
+		// Facing right: remove head and show (|\ on row 1, / ) on row 2
+		g.screen.SetContent(x, y, ' ', nil, style)
+		g.screen.SetContent(x+1, y, ' ', nil, style)
+		g.screen.SetContent(x+2, y, ' ', nil, style)
+
+		g.screen.SetContent(x, y+1, '(', nil, style)
+		g.screen.SetContent(x+1, y+1, '|', nil, style)
+		g.screen.SetContent(x+2, y+1, '\\', nil, style)
+
+		g.screen.SetContent(x, y+2, '/', nil, style)
+		g.screen.SetContent(x+1, y+2, ' ', nil, style)
+		g.screen.SetContent(x+2, y+2, ')', nil, style)
+	} else {
+		// Facing left: remove head and show /|) on row 1, ( \ on row 2
+		g.screen.SetContent(x, y, ' ', nil, style)
+		g.screen.SetContent(x+1, y, ' ', nil, style)
+		g.screen.SetContent(x+2, y, ' ', nil, style)
+
+		g.screen.SetContent(x, y+1, '/', nil, style)
+		g.screen.SetContent(x+1, y+1, '|', nil, style)
+		g.screen.SetContent(x+2, y+1, ')', nil, style)
+
 		g.screen.SetContent(x, y+2, '(', nil, style)
 		g.screen.SetContent(x+1, y+2, ' ', nil, style)
 		g.screen.SetContent(x+2, y+2, '\\', nil, style)
@@ -921,6 +971,11 @@ func (g *Game) createPlayerDeathParticles() {
 }
 
 func (g *Game) createDeathParticles(e *Enemy) {
+	// 5% chance to decapitate: head pops off and body becomes mobile corpse
+	if rand.Float64() < 0.1 {
+		g.createDecap(e)
+		return
+	}
 	// Assign a unique enemy ID for this enemy's particles
 	enemyID := g.nextEnemyID
 	g.nextEnemyID++
@@ -1034,6 +1089,242 @@ func (g *Game) createDeathParticles(e *Enemy) {
 
 }
 
+// createDeathParticlesAt splits a body at a given position/facing using the provided enemyID
+func (g *Game) createDeathParticlesAt(pos Vec2, facing int, enemyID int, wasOnPlatform bool) {
+	// Extract actual enemy sprite characters based on facing direction
+	type SpritePiece struct {
+		char rune
+		x    int
+		y    int
+	}
+
+	var pieces []SpritePiece
+	if facing == 1 { // Facing right
+		pieces = []SpritePiece{
+			{'O', 1, 0},
+			{'(', 0, 1},
+			{'|', 1, 1},
+			{'\\', 2, 1},
+			{'/', 0, 2},
+			{')', 2, 2},
+		}
+	} else {
+		pieces = []SpritePiece{
+			{'O', 1, 0},
+			{'/', 0, 1},
+			{'|', 1, 1},
+			{')', 2, 1},
+			{'(', 0, 2},
+			{'\\', 2, 2},
+		}
+	}
+
+	for _, piece := range pieces {
+		// 20% chance to be red
+		isRed := rand.Float64() < 0.2
+		// 30% chance to fall through ground
+		fallsThrough := rand.Float64() < 0.3
+
+		// Check if this is the head piece
+		isHead := (piece.char == 'O')
+		isRolling := false
+		rollDistance := 0.0
+		rollSpeed := 0.0
+
+		// Head piece may roll if it lands
+		if isHead && rand.Float64() < 0.05 {
+			isRolling = true
+			rollDistance = 20.0 + rand.Float64()*30.0
+			rollSpeed = 40.0 + rand.Float64()*20.0
+			if rand.Float64() < 0.5 {
+				rollSpeed = -rollSpeed
+			}
+		}
+
+		angle := rand.Float64() * 2 * 3.14159
+		speed := 20.0 + rand.Float64()*30.0
+		velX := math.Cos(angle) * speed
+		velY := -15.0 - rand.Float64()*25.0 + math.Sin(angle)*speed*0.5
+
+		angularVel := (rand.Float64() - 0.5) * 360.0
+
+		particle := DeathParticle{
+			Pos:                     Vec2{X: pos.X + float64(piece.x), Y: pos.Y + float64(piece.y)},
+			Vel:                     Vec2{X: velX, Y: velY},
+			Char:                    piece.char,
+			OnGround:                false,
+			Bounces:                 0,
+			GroundTime:              time.Time{},
+			Active:                  true,
+			EnemyID:                 enemyID,
+			IsRed:                   isRed,
+			AngularVel:              angularVel,
+			Angle:                   0,
+			FallsThrough:            fallsThrough,
+			IsHead:                  isHead,
+			IsRolling:               isRolling,
+			RollDistance:            rollDistance,
+			RollSpeed:               rollSpeed,
+			BouncedFromPlatform:     false,
+			WasOnPlatform:           wasOnPlatform,
+			HasSplattedFromPlatform: false,
+			LastBloodEmit:           time.Now(),
+			HasHitGround:            false,
+		}
+		g.deathParticles = append(g.deathParticles, particle)
+
+		initialSpeed := math.Sqrt(velX*velX + velY*velY)
+		intensity := math.Min(initialSpeed/80.0, 1.0)
+		g.emitBloodFromParticle(&g.deathParticles[len(g.deathParticles)-1], intensity, true)
+	}
+}
+
+// createDecap handles the special decapitation case: spawn a rolling head and a mobile corpse
+func (g *Game) createDecap(e *Enemy) {
+	// Reserve an enemy ID for corpse and head
+	enemyID := g.nextEnemyID
+	g.nextEnemyID++
+
+	// Determine if enemy was on a platform
+	wasOnPlatform := false
+	for _, platform := range g.platforms {
+		enemyBottomY := e.Pos.Y + float64(e.Height)
+		if e.Pos.X < platform.X+platform.Width &&
+			e.Pos.X+float64(e.Width) > platform.X &&
+			math.Abs(enemyBottomY-platform.Y) < 2.0 {
+			wasOnPlatform = true
+			break
+		}
+	}
+
+	// Create a single head particle that pops off and rolls
+	pieceX := 1
+	pieceY := 0
+	if e.Facing != 1 {
+		// same offsets regardless of facing in this sprite
+	}
+
+	isHead := true
+	isRolling := true
+	rollDistance := 20.0 + rand.Float64()*30.0
+	rollSpeed := 40.0 + rand.Float64()*20.0
+	if rand.Float64() < 0.5 {
+		rollSpeed = -rollSpeed
+	}
+
+	angle := rand.Float64() * 2 * 3.14159
+	speed := 20.0 + rand.Float64()*30.0
+	velX := math.Cos(angle) * speed
+	velY := -15.0 - rand.Float64()*25.0 + math.Sin(angle)*speed*0.5
+
+	angularVel := (rand.Float64() - 0.5) * 360.0
+
+	head := DeathParticle{
+		Pos:          Vec2{X: e.Pos.X + float64(pieceX), Y: e.Pos.Y + float64(pieceY)},
+		Vel:          Vec2{X: velX, Y: velY},
+		Char:         'O',
+		OnGround:     false,
+		Bounces:      0,
+		GroundTime:   time.Time{},
+		Active:       true,
+		EnemyID:      enemyID,
+		IsRed:        true,
+		AngularVel:   angularVel,
+		Angle:        0,
+		FallsThrough: false,
+		IsHead:       isHead,
+		IsRolling:    isRolling,
+		RollDistance: rollDistance,
+		RollSpeed:    rollSpeed,
+		LastBloodEmit: time.Now(),
+	}
+	g.deathParticles = append(g.deathParticles, head)
+	// Emit an initial burst from the head pop
+	initialSpeed := math.Sqrt(velX*velX + velY*velY)
+	intensity := math.Min(initialSpeed/80.0, 1.0)
+	g.emitBloodFromParticle(&g.deathParticles[len(g.deathParticles)-1], intensity, true)
+
+	// Create a mobile corpse that will run back and forth while squirting blood
+	duration := 2*time.Second + time.Duration(rand.Intn(2000))*time.Millisecond // 2-4s
+	moveDir := 1
+	if rand.Float64() < 0.5 {
+		moveDir = -1
+	}
+	corp := Corpse{
+		Pos:           Vec2{X: e.Pos.X, Y: e.Pos.Y},
+		Facing:        e.Facing,
+		Active:        true,
+		EnemyID:       enemyID,
+		EndTime:       time.Now().Add(duration),
+		MoveDir:       moveDir,
+		LastDirChange: time.Now(),
+		DirDuration:   time.Duration(200+rand.Intn(600)) * time.Millisecond,
+		LastBloodEmit: time.Now(),
+		WasOnPlatform: wasOnPlatform,
+	}
+	g.corpses = append(g.corpses, corp)
+}
+
+// updateCorpses moves mobile corpses and makes them squirt blood; when expired they break apart
+func (g *Game) updateCorpses(deltaTime float64) {
+	if len(g.corpses) == 0 {
+		return
+	}
+
+	now := time.Now()
+	for i := range g.corpses {
+		c := &g.corpses[i]
+		if !c.Active {
+			continue
+		}
+
+		// Possibly change direction after DirDuration
+		if now.Sub(c.LastDirChange) >= c.DirDuration {
+			c.LastDirChange = now
+			c.DirDuration = time.Duration(200+rand.Intn(600)) * time.Millisecond
+			// Randomly flip direction with 50% chance
+			if rand.Float64() < 0.5 {
+				c.MoveDir = -c.MoveDir
+			}
+		}
+
+		// Move corpse horizontally
+		speed := 25.0
+		c.Pos.X += float64(c.MoveDir) * speed * deltaTime
+
+		// Keep corpse in screen bounds
+		if c.Pos.X < 0 {
+			c.Pos.X = 0
+			c.MoveDir = 1
+		}
+		if c.Pos.X > float64(g.width-EnemyWidth) {
+			c.Pos.X = float64(g.width-EnemyWidth)
+			c.MoveDir = -1
+		}
+
+		// Emit blood particles periodically while moving
+		if now.Sub(c.LastBloodEmit) >= 80*time.Millisecond {
+			// Create a temporary death particle to base emission on
+			tmp := DeathParticle{
+				Pos:    Vec2{X: c.Pos.X + float64(1), Y: c.Pos.Y + float64(1)},
+				Vel:    Vec2{X: float64(c.MoveDir) * speed, Y: 0},
+				EnemyID: c.EnemyID,
+			}
+			// Intensity based on horizontal speed
+			intensity := math.Min(math.Abs(float64(c.MoveDir))*speed/80.0, 0.7)
+			g.emitBloodFromParticle(&tmp, intensity, false)
+			c.LastBloodEmit = now
+		}
+
+		// Check expiration
+		if now.After(c.EndTime) {
+			// Break corpse apart into regular death particles
+			g.createDeathParticlesAt(c.Pos, c.Facing, c.EnemyID, c.WasOnPlatform)
+			c.Active = false
+		}
+	}
+}
+
 func (g *Game) isTileUnderPlatform(x int) bool {
 	// Check if a ground tile at x is directly under any platform
 	for _, platform := range g.platforms {
@@ -1141,6 +1432,8 @@ func (g *Game) emitBloodFromParticle(p *DeathParticle, intensity float64, impact
 }
 
 func (g *Game) updateDeathParticles(deltaTime float64) {
+	// Update any mobile corpses first so they can squirt blood and later break apart
+	g.updateCorpses(deltaTime)
 	gravity := 300.0                  // pixels per second squared (increased to ensure falling)
 	bounceDamping := 0.4              // Velocity reduction on bounce (reduced to make bounces weaker)
 	groundY := float64(g.groundY - 1) // Rest one row above ground
@@ -2130,6 +2423,13 @@ func (g *Game) render() {
 			}
 		}
 
+		// Draw any mobile corpses (decapitated bodies)
+		for i := range g.corpses {
+			if g.corpses[i].Active {
+				g.drawCorpse(&g.corpses[i])
+			}
+		}
+
 		g.drawDeathParticles()
 		g.drawBloodParticles()
 
@@ -2155,6 +2455,13 @@ func (g *Game) render() {
 		for i := range g.enemies {
 			if g.enemies[i].Active {
 				g.drawEnemy(&g.enemies[i])
+			}
+		}
+
+		// Draw any mobile corpses (decapitated bodies)
+		for i := range g.corpses {
+			if g.corpses[i].Active {
+				g.drawCorpse(&g.corpses[i])
 			}
 		}
 
