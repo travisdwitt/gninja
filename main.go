@@ -95,7 +95,9 @@ type BloodParticle struct {
 // Corpse represents a temporarily mobile body after decapitation
 type Corpse struct {
 	Pos            Vec2
+	Vel            Vec2
 	Facing         int
+	OnGround       bool
 	Active         bool
 	EnemyID        int
 	EndTime        time.Time
@@ -1252,7 +1254,9 @@ func (g *Game) createDecap(e *Enemy) {
 	}
 	corp := Corpse{
 		Pos:           Vec2{X: e.Pos.X, Y: e.Pos.Y},
+		Vel:           e.Vel,
 		Facing:        e.Facing,
+		OnGround:      false,
 		Active:        true,
 		EnemyID:       enemyID,
 		EndTime:       time.Now().Add(duration),
@@ -1272,6 +1276,8 @@ func (g *Game) updateCorpses(deltaTime float64) {
 	}
 
 	now := time.Now()
+	gravity := 300.0
+	groundY := float64(g.groundY - EnemyHeight)
 	for i := range g.corpses {
 		c := &g.corpses[i]
 		if !c.Active {
@@ -1292,6 +1298,44 @@ func (g *Game) updateCorpses(deltaTime float64) {
 		speed := 25.0
 		c.Pos.X += float64(c.MoveDir) * speed * deltaTime
 
+		// Apply gravity and vertical movement
+		c.Vel.Y += gravity * deltaTime
+		c.Pos.Y += c.Vel.Y * deltaTime
+
+		// Check platform collisions
+		onPlatform := false
+		for _, platform := range g.platforms {
+			particleBottomY := c.Pos.Y + float64(EnemyHeight)
+			if c.Pos.X < platform.X+platform.Width &&
+				c.Pos.X+float64(EnemyWidth) > platform.X &&
+				particleBottomY >= platform.Y &&
+				particleBottomY <= platform.Y+platform.Height+1.0 {
+				// Land on platform
+				if c.Vel.Y > 0 && c.Pos.Y < platform.Y {
+					platformTopY := platform.Y - float64(EnemyHeight)
+					c.Pos.Y = platformTopY
+					c.Vel.Y = 0
+					c.OnGround = true
+					c.WasOnPlatform = true
+				}
+				onPlatform = true
+				break
+			}
+		}
+
+		if !onPlatform {
+			// Ground collision
+			if c.Pos.Y >= groundY {
+				c.Pos.Y = groundY
+				if c.Vel.Y > 0 {
+					c.Vel.Y = 0
+				}
+				c.OnGround = true
+			} else {
+				c.OnGround = false
+			}
+		}
+
 		// Keep corpse in screen bounds
 		if c.Pos.X < 0 {
 			c.Pos.X = 0
@@ -1304,14 +1348,14 @@ func (g *Game) updateCorpses(deltaTime float64) {
 
 		// Emit blood particles periodically while moving
 		if now.Sub(c.LastBloodEmit) >= 80*time.Millisecond {
-			// Create a temporary death particle to base emission on
+			// Create a temporary death particle to base emission on (add vertical spray)
 			tmp := DeathParticle{
-				Pos:    Vec2{X: c.Pos.X + float64(1), Y: c.Pos.Y + float64(1)},
-				Vel:    Vec2{X: float64(c.MoveDir) * speed, Y: 0},
+				Pos:    Vec2{X: c.Pos.X + 1.0, Y: c.Pos.Y + 1.0},
+				Vel:    Vec2{X: float64(c.MoveDir) * speed, Y: -10.0 - rand.Float64()*20.0},
 				EnemyID: c.EnemyID,
 			}
-			// Intensity based on horizontal speed
-			intensity := math.Min(math.Abs(float64(c.MoveDir))*speed/80.0, 0.7)
+			// Intensity based on horizontal speed but increased for visceral effect
+			intensity := math.Min((math.Abs(float64(c.MoveDir))*speed/80.0)*1.4+0.15, 1.0)
 			g.emitBloodFromParticle(&tmp, intensity, false)
 			c.LastBloodEmit = now
 		}
